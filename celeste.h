@@ -24,6 +24,17 @@ extern void Celeste_P8_draw(void);
 
 extern void Celeste_P8__DEBUG(void); //debug functionality
 
+typedef struct {
+	unsigned long long jumps;
+	unsigned long long dashes;
+	unsigned long long strawberries_collected;
+	unsigned long long time_frames;
+	unsigned long long levels_climbed;
+	unsigned long long full_completions;
+} Celeste_P8_Stats;
+
+void Celeste_P8_get_run_stats(Celeste_P8_Stats* out_stats);
+
 //state functionality
 size_t Celeste_P8_get_state_size(void);
 void Celeste_P8_save_state(void* st);

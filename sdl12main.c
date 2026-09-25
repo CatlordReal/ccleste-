@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <time.h>
+#include <stdint.h>
 #ifdef _3DS
 #include <3ds.h>
 #endif
@@ -227,7 +228,7 @@ static void OSDdraw(void) {
 		p8_print(osd_text, x, y, 7);
 	}
 }
-	
+
 static Mix_Music* current_music = NULL;
 static _Bool enable_screenshake = 1;
 static _Bool paused = 0;
@@ -235,8 +236,171 @@ static _Bool running = 1;
 static void* initial_game_state = NULL;
 static void* game_state = NULL;
 static Mix_Music* game_state_music = NULL;
+static _Bool pause_show_stats = 0;
 static void mainLoop(void);
 static FILE* TAS = NULL;
+
+typedef struct {
+	uint64_t jumps;
+	uint64_t dashes;
+	uint64_t strawberries_collected;
+	uint64_t time_frames;
+	uint64_t levels_climbed;
+	uint64_t full_completions;
+} SavedStats;
+
+typedef struct {
+	char magic[8];
+	uint32_t version;
+	uint32_t state_size;
+	SavedStats all_time;
+} ProgressHeader;
+
+static const char progress_file_path[] = "ccleste-progress.bin";
+static const char progress_magic[8] = {'C','C','L','E','S','T','E','2'};
+static SavedStats all_time_stats = {0};
+static SavedStats prev_run_stats = {0};
+static _Bool have_prev_run_stats = 0;
+static void* persistent_progress_state = NULL;
+static int autosave_counter = 0;
+
+static SavedStats GetRunStats(void) {
+	Celeste_P8_Stats run = {0};
+	Celeste_P8_get_run_stats(&run);
+	SavedStats out = {
+		.jumps = run.jumps,
+		.dashes = run.dashes,
+		.strawberries_collected = run.strawberries_collected,
+		.time_frames = run.time_frames,
+		.levels_climbed = run.levels_climbed,
+		.full_completions = run.full_completions
+	};
+	return out;
+}
+
+static uint64_t CalcXP(const SavedStats* stats) {
+	return stats->jumps + stats->dashes * 2 + stats->strawberries_collected * 100 +
+		stats->levels_climbed * 50 + stats->full_completions * 1000;
+}
+
+static void FormatTime(char* out, size_t out_size, uint64_t frames) {
+	uint64_t total_seconds = frames / 30;
+	uint64_t h = total_seconds / 3600;
+	uint64_t m = (total_seconds / 60) % 60;
+	uint64_t s = total_seconds % 60;
+	snprintf(out, out_size, "%02llu:%02llu:%02llu",
+		(unsigned long long)h, (unsigned long long)m, (unsigned long long)s);
+}
+
+static void ResetRunTracking(void) {
+	prev_run_stats = GetRunStats();
+	have_prev_run_stats = 1;
+}
+
+static void UpdateAllTimeStatsFromRun(void) {
+	SavedStats run = GetRunStats();
+	if (!have_prev_run_stats) {
+		prev_run_stats = run;
+		have_prev_run_stats = 1;
+		return;
+	}
+	if (run.jumps < prev_run_stats.jumps || run.dashes < prev_run_stats.dashes
+	 || run.strawberries_collected < prev_run_stats.strawberries_collected
+	 || run.time_frames < prev_run_stats.time_frames
+	 || run.levels_climbed < prev_run_stats.levels_climbed
+	 || run.full_completions < prev_run_stats.full_completions) {
+		prev_run_stats = run;
+		return;
+	}
+	all_time_stats.jumps += run.jumps - prev_run_stats.jumps;
+	all_time_stats.dashes += run.dashes - prev_run_stats.dashes;
+	all_time_stats.strawberries_collected += run.strawberries_collected - prev_run_stats.strawberries_collected;
+	all_time_stats.time_frames += run.time_frames - prev_run_stats.time_frames;
+	all_time_stats.levels_climbed += run.levels_climbed - prev_run_stats.levels_climbed;
+	all_time_stats.full_completions += run.full_completions - prev_run_stats.full_completions;
+	prev_run_stats = run;
+}
+
+static int SaveProgressFile(_Bool include_state) {
+	FILE* f = fopen(progress_file_path, "wb");
+	if (!f) {
+		return 0;
+	}
+
+	const uint32_t state_size = (uint32_t)Celeste_P8_get_state_size();
+	ProgressHeader header = {
+		.version = 1,
+		.state_size = include_state ? state_size : 0,
+		.all_time = all_time_stats
+	};
+	memcpy(header.magic, progress_magic, sizeof header.magic);
+	if (fwrite(&header, sizeof header, 1, f) != 1) {
+		fclose(f);
+		return 0;
+	}
+
+	if (include_state) {
+		if (!persistent_progress_state) {
+			persistent_progress_state = SDL_malloc(state_size);
+		}
+		if (!persistent_progress_state) {
+			fclose(f);
+			return 0;
+		}
+		Celeste_P8_save_state(persistent_progress_state);
+		if (fwrite(persistent_progress_state, state_size, 1, f) != 1) {
+			fclose(f);
+			return 0;
+		}
+	}
+	fclose(f);
+	return 1;
+}
+
+static int LoadProgressFile(void) {
+	FILE* f = fopen(progress_file_path, "rb");
+	if (!f) {
+		return 0;
+	}
+
+	ProgressHeader header = {0};
+	if (fread(&header, sizeof header, 1, f) != 1) {
+		fclose(f);
+		return 0;
+	}
+	if (memcmp(header.magic, progress_magic, sizeof header.magic) != 0 || header.version != 1) {
+		fclose(f);
+		return 0;
+	}
+	all_time_stats = header.all_time;
+
+	const uint32_t state_size = (uint32_t)Celeste_P8_get_state_size();
+	if (header.state_size == state_size && state_size > 0) {
+		if (!persistent_progress_state) {
+			persistent_progress_state = SDL_malloc(state_size);
+		}
+		if (persistent_progress_state && fread(persistent_progress_state, state_size, 1, f) == 1) {
+			Celeste_P8_load_state(persistent_progress_state);
+		}
+	}
+	fclose(f);
+	ResetRunTracking();
+	return 1;
+}
+
+static void ResetToStartAndClearRunProgress(void) {
+	paused = 0;
+	pause_show_stats = 0;
+	Celeste_P8_set_rndseed((unsigned)(time(NULL) + SDL_GetTicks()));
+	Mix_HaltChannel(-1);
+	Mix_HaltMusic();
+	if (initial_game_state) {
+		Celeste_P8_load_state(initial_game_state);
+	}
+	Celeste_P8_init();
+	remove(progress_file_path);
+	ResetRunTracking();
+}
 
 #ifdef _3DS
 // hack: newer SDL versions remove SDL_N3DSKeyBind, but I'm too lazy to change the
@@ -366,6 +530,10 @@ int main(int argc, char** argv) {
 	}
 
 	Celeste_P8_init();
+	ResetRunTracking();
+	if (LoadProgressFile()) {
+		OSDset("progress loaded");
+	}
 
 	printf("ready\n");
 	{
@@ -389,8 +557,11 @@ int main(int argc, char** argv) {
 	return 0;
 #endif
 
+	SaveProgressFile(1);
+
 	if (game_state) SDL_free(game_state);
 	if (initial_game_state) SDL_free(initial_game_state);
+	if (persistent_progress_state) SDL_free(persistent_progress_state);
 
 	SDL_FreeSurface(gfx);
 	SDL_FreeSurface(font);
@@ -435,12 +606,7 @@ static void mainLoop(void) {
 			reset_input_timer=0;
 			//reset
 			OSDset("reset");
-			paused = 0;
-			Celeste_P8_load_state(initial_game_state);
-			Celeste_P8_set_rndseed((unsigned)(time(NULL) + SDL_GetTicks()));
-			Mix_HaltChannel(-1);
-			Mix_HaltMusic();
-			Celeste_P8_init();
+			ResetToStartAndClearRunProgress();
 		}
 	} else reset_input_timer = 0;
 
@@ -483,10 +649,20 @@ static void mainLoop(void) {
 				toggle_pause:
 				if (paused) Mix_Resume(-1), Mix_ResumeMusic(); else Mix_Pause(-1), Mix_PauseMusic();
 				paused = !paused;
+				if (!paused) {
+					pause_show_stats = 0;
+				}
 				break;
 			} else if (ev.key.keysym.sym == SDLK_DELETE) { //exit
 				press_exit:
 				running = 0;
+				break;
+			} else if (ev.key.keysym.sym == SDLK_TAB && paused) {
+				pause_show_stats = !pause_show_stats;
+				break;
+			} else if (ev.key.keysym.sym == SDLK_r && paused) {
+				OSDset("back to start");
+				ResetToStartAndClearRunProgress();
 				break;
 			} else if (ev.key.keysym.sym == SDLK_F11 && !(kbstate[SDLK_LSHIFT] || kbstate[SDLK_ESCAPE])) {
 				if (SDL_WM_ToggleFullScreen(screen)) { //this doesn't work on windows..
@@ -530,6 +706,16 @@ static void mainLoop(void) {
 				OSDset("screenshake: %s", enable_screenshake ? "on" : "off");
 			} break;
 		}
+#if SDL_MAJOR_VERSION >= 2
+		case SDL_CONTROLLERBUTTONDOWN: {
+			if (paused && ev.cbutton.button == SDL_CONTROLLER_BUTTON_X) {
+				pause_show_stats = !pause_show_stats;
+			} else if (paused && ev.cbutton.button == SDL_CONTROLLER_BUTTON_Y) {
+				OSDset("back to start");
+				ResetToStartAndClearRunProgress();
+			}
+		} break;
+#endif
 	}
 
 	if (!TAS) {
@@ -550,12 +736,55 @@ static void mainLoop(void) {
 		} else buttons_state = 0;
 	}
 
-	if (paused) {
-		const int x0 = PICO8_W/2-3*4, y0 = 8;
+	if (!paused) {
+		UpdateAllTimeStatsFromRun();
+		if (++autosave_counter >= 300) {
+			autosave_counter = 0;
+			SaveProgressFile(1);
+		}
+	}
 
-		p8_rectfill(x0-1,y0-1, 6*4+x0+1,6+y0+1, 6);
-		p8_rectfill(x0,y0, 6*4+x0,6+y0, 0);
-		p8_print("paused", x0+1, y0+1, 7);
+	if (paused) {
+		p8_rectfill(6,6,121,121,0);
+		p8_rectfill(5,5,122,122,6);
+		p8_rectfill(6,6,121,121,0);
+		p8_print("paused", 50, 10, 7);
+		if (!pause_show_stats) {
+			p8_print("tab/x: stats", 12, 30, 7);
+			p8_print("r/y: back to start", 12, 40, 7);
+			p8_print("esc/start: resume", 12, 50, 7);
+		} else {
+			SavedStats run = GetRunStats();
+			char line[64];
+			char tm[32];
+			FormatTime(tm, sizeof tm, run.time_frames);
+			snprintf(line, sizeof line, "run jumps: %llu", (unsigned long long)run.jumps);
+			p8_print(line, 10, 24, 7);
+			snprintf(line, sizeof line, "run dashes: %llu", (unsigned long long)run.dashes);
+			p8_print(line, 10, 32, 7);
+			snprintf(line, sizeof line, "run time: %s", tm);
+			p8_print(line, 10, 40, 7);
+			snprintf(line, sizeof line, "run berries: %llu", (unsigned long long)run.strawberries_collected);
+			p8_print(line, 10, 48, 7);
+			snprintf(line, sizeof line, "run xp: %llu", (unsigned long long)CalcXP(&run));
+			p8_print(line, 10, 56, 7);
+
+			FormatTime(tm, sizeof tm, all_time_stats.time_frames);
+			snprintf(line, sizeof line, "all jumps: %llu", (unsigned long long)all_time_stats.jumps);
+			p8_print(line, 10, 72, 7);
+			snprintf(line, sizeof line, "all dashes: %llu", (unsigned long long)all_time_stats.dashes);
+			p8_print(line, 10, 80, 7);
+			snprintf(line, sizeof line, "all time: %s", tm);
+			p8_print(line, 10, 88, 7);
+			snprintf(line, sizeof line, "all berries: %llu", (unsigned long long)all_time_stats.strawberries_collected);
+			p8_print(line, 10, 96, 7);
+			snprintf(line, sizeof line, "all xp: %llu", (unsigned long long)CalcXP(&all_time_stats));
+			p8_print(line, 10, 104, 7);
+			snprintf(line, sizeof line, "metres: %llum comp: %llu",
+				(unsigned long long)(all_time_stats.levels_climbed * 100),
+				(unsigned long long)all_time_stats.full_completions);
+			p8_print(line, 10, 112, 7);
+		}
 	} else {
 		Celeste_P8_update();
 		Celeste_P8_draw();
