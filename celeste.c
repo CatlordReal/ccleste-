@@ -309,6 +309,13 @@ static short minutes; //this variable can overflow in normal gameplay (after +50
 static int deaths, max_djump;
 static bool start_game;
 static int start_game_flash;
+static unsigned long long run_jumps;
+static unsigned long long run_dashes;
+static unsigned long long run_strawberries_collected;
+static unsigned long long run_time_frames;
+static unsigned long long run_levels_climbed;
+static unsigned long long run_full_completions;
+static bool run_completion_counted;
 
 enum {
   k_left  = 0,
@@ -376,6 +383,13 @@ static void title_screen() {
 	max_djump=1;
 	start_game=false;
 	start_game_flash=0;
+	run_jumps=0;
+	run_dashes=0;
+	run_strawberries_collected=0;
+	run_time_frames=0;
+	run_levels_climbed=0;
+	run_full_completions=0;
+	run_completion_counted=false;
 	P8music(40,0,7);
    
 	load_room(7,3);
@@ -387,6 +401,13 @@ static void begin_game() {
 	minutes=0;
 	music_timer=0;
 	start_game=false;
+	run_jumps=0;
+	run_dashes=0;
+	run_strawberries_collected=0;
+	run_time_frames=0;
+	run_levels_climbed=0;
+	run_full_completions=0;
+	run_completion_counted=false;
 	P8music(0,0,7);
 	load_room(0,0);
 }
@@ -793,6 +814,7 @@ static void PLAYER_update(OBJ* this) {
 				this->jbuffer=0;
 				this->grace=0;
 				this->spd.y=-2;
+				run_jumps+=1;
 				init_object(OBJ_SMOKE,this->x,this->y+4);
 			} else {
 				// wall jump
@@ -802,6 +824,7 @@ static void PLAYER_update(OBJ* this) {
 					this->jbuffer=0;
 					this->spd.y=-2;
 					this->spd.x=-wall_dir*(maxrun+1);
+					run_jumps+=1;
 					if (!OBJ_is_ice(this, wall_dir*3,0)) {
 						init_object(OBJ_SMOKE,this->x+wall_dir*6,this->y);
 					}
@@ -816,6 +839,7 @@ static void PLAYER_update(OBJ* this) {
 		if (this->djump>0 && dash) {
 			init_object(OBJ_SMOKE,this->x,this->y);
 			this->djump-=1;
+			run_dashes+=1;
 			this->dash_time=4;
 			has_dashed=true;
 			this->dash_effect_time=10;
@@ -1163,6 +1187,7 @@ static void FRUIT_update(OBJ* this) {
 		sfx_timer=20;
 		P8sfx(13);
 		got_fruit[level_index()] = true;
+		run_strawberries_collected+=1;
 		init_object(OBJ_LIFEUP,this->x,this->y);
 		destroy_object(this);
 		return; //LEMON: added return to not modify dead object
@@ -1211,6 +1236,7 @@ static void FLY_FRUIT_update(OBJ* this) {
 		sfx_timer=20;
 		P8sfx(13);
 		got_fruit[level_index()] = true;
+		run_strawberries_collected+=1;
 		init_object(OBJ_LIFEUP,this->x,this->y);
 		do_destroy_object = true;
 	}
@@ -1492,6 +1518,10 @@ static void FLAG_draw(OBJ* this) {
 		P8sfx(55);
 		sfx_timer=30;
 		this->show=true;
+		if (level_index()==30 && !run_completion_counted) {
+			run_completion_counted=true;
+			run_full_completions+=1;
+		}
 	}
 }
 
@@ -1627,6 +1657,7 @@ static void next_room() {
 	} else {
 		load_room(room.x+1,room.y);
 	}
+	run_levels_climbed+=1;
 }
 
 static bool room_just_loaded = false; //for debugging loading jank
@@ -1679,6 +1710,10 @@ static void load_room(int x, int y) {
 /////////////////////
 
 void Celeste_P8_update() {
+	if (!is_title()) {
+		run_time_frames+=1;
+	}
+
 	frames=((frames+1)%30);
 	if (frames==0 && level_index()<30) {
 		seconds=((seconds+1)%60);
@@ -1997,13 +2032,27 @@ void Celeste_P8__DEBUG(void) {
 	else next_room();
 }
 
+void Celeste_P8_get_run_stats(Celeste_P8_Stats* out_stats) {
+	if (!out_stats) {
+		return;
+	}
+	out_stats->jumps = run_jumps;
+	out_stats->dashes = run_dashes;
+	out_stats->strawberries_collected = run_strawberries_collected;
+	out_stats->time_frames = run_time_frames;
+	out_stats->levels_climbed = run_levels_climbed;
+	out_stats->full_completions = run_full_completions;
+}
+
 //all of the global game variables; this holds the entire game state (exc. music/sounds playing)
 #define LISTGVARS(V) \
 	V(rnd_seed_lo) V(rnd_seed_hi) \
 	V(room) V(freeze) V(shake) V(will_restart) V(delay_restart) V(got_fruit) \
 	V(has_dashed) V(sfx_timer) V(has_key) V(pause_player) V(flash_bg) V(music_timer) \
 	V(new_bg) V(frames) V(seconds) V(minutes) V(deaths) V(max_djump) V(start_game) \
-	V(start_game_flash) V(clouds) V(particles) V(dead_particles) V(objects)
+	V(start_game_flash) V(run_jumps) V(run_dashes) V(run_strawberries_collected) \
+	V(run_time_frames) V(run_levels_climbed) V(run_full_completions) V(run_completion_counted) \
+	V(clouds) V(particles) V(dead_particles) V(objects)
 
 size_t Celeste_P8_get_state_size(void) {
 #define V_SIZE(v) (sizeof v) +
