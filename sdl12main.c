@@ -229,6 +229,41 @@ static void OSDdraw(void) {
 	}
 }
 
+static Mix_Music* current_music = NULL;
+static _Bool enable_screenshake = 1;
+static _Bool paused = 0;
+static _Bool running = 1;
+static void* initial_game_state = NULL;
+static void* game_state = NULL;
+static Mix_Music* game_state_music = NULL;
+static _Bool pause_show_stats = 0;
+static void mainLoop(void);
+static FILE* TAS = NULL;
+
+typedef struct {
+	uint64_t jumps;
+	uint64_t dashes;
+	uint64_t strawberries_collected;
+	uint64_t time_frames;
+	uint64_t levels_climbed;
+	uint64_t full_completions;
+} SavedStats;
+
+typedef struct {
+	char magic[8];
+	uint32_t version;
+	uint32_t state_size;
+	SavedStats all_time;
+} ProgressHeader;
+
+static const char progress_file_path[] = "ccleste-progress.bin";
+static const char progress_magic[8] = {'C','C','L','E','S','T','E','2'};
+static SavedStats all_time_stats = {0};
+static SavedStats prev_run_stats = {0};
+static _Bool have_prev_run_stats = 0;
+static void* persistent_progress_state = NULL;
+static int autosave_counter = 0;
+
 static SavedStats GetRunStats(void) {
 	Celeste_P8_Stats run = {0};
 	Celeste_P8_get_run_stats(&run);
@@ -366,41 +401,6 @@ static void ResetToStartAndClearRunProgress(void) {
 	remove(progress_file_path);
 	ResetRunTracking();
 }
-	
-static Mix_Music* current_music = NULL;
-static _Bool enable_screenshake = 1;
-static _Bool paused = 0;
-static _Bool running = 1;
-static void* initial_game_state = NULL;
-static void* game_state = NULL;
-static Mix_Music* game_state_music = NULL;
-static _Bool pause_show_stats = 0;
-static void mainLoop(void);
-static FILE* TAS = NULL;
-
-typedef struct {
-	uint64_t jumps;
-	uint64_t dashes;
-	uint64_t strawberries_collected;
-	uint64_t time_frames;
-	uint64_t levels_climbed;
-	uint64_t full_completions;
-} SavedStats;
-
-typedef struct {
-	char magic[8];
-	uint32_t version;
-	uint32_t state_size;
-	SavedStats all_time;
-} ProgressHeader;
-
-static const char progress_file_path[] = "ccleste-progress.bin";
-static const char progress_magic[8] = {'C','C','L','E','S','T','E','2'};
-static SavedStats all_time_stats = {0};
-static SavedStats prev_run_stats = {0};
-static _Bool have_prev_run_stats = 0;
-static void* persistent_progress_state = NULL;
-static int autosave_counter = 0;
 
 #ifdef _3DS
 // hack: newer SDL versions remove SDL_N3DSKeyBind, but I'm too lazy to change the
